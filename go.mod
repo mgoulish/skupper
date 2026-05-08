@@ -1,6 +1,6 @@
 module github.com/skupperproject/skupper
 
-go 1.25.0
+go 1.25.9
 
 require (
 	github.com/Azure/go-amqp v1.0.5
@@ -36,6 +36,8 @@ require (
 	k8s.io/utils v0.0.0-20241104100929-3ea5e8cea738
 	sigs.k8s.io/yaml v1.4.0
 )
+
+require github.com/goccy/go-yaml v1.19.2 // indirect
 
 replace github.com/gogo/protobuf => github.com/gogo/protobuf v1.3.2
 
@@ -75,6 +77,7 @@ require (
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/mgoulish/mentat-go-2 v0.0.0
 	github.com/mitchellh/mapstructure v1.4.3 // indirect
 	github.com/moby/spdystream v0.5.0 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
@@ -114,3 +117,6 @@ require (
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.6.0 // indirect
 )
+
+// for local development only:
+//replace github.com/mgoulish/mentat-go-2 => /home/mick/mentat-go-2
