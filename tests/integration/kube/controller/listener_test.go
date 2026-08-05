@@ -65,3 +65,33 @@ func TestSiteWithListener(t *testing.T) {
 	assert.NilError(t, err)
 	assert.Assert(t, strings.Contains(routerConfig.Data[types.TransportConfigFile], "listener/mylistener"))
 }
+
+func TestListenerWithoutSite(t *testing.T) {
+	tc := setup(t)
+	namespace := "listener-no-site"
+	tc.createNamespace(namespace)
+
+	ctx := context.Background()
+
+	listener := listenerWithHostPort("test-listener", namespace, "test-service", 8080)
+	_, err := tc.clients.GetSkupperClient().SkupperV2alpha1().Listeners(namespace).Create(ctx, listener, metav1.CreateOptions{})
+	assert.NilError(t, err)
+
+	var actual *skupperv2alpha1.Listener
+	waitFor(t, 30*time.Second, 250*time.Millisecond, func() (bool, error) {
+		var err error
+		actual, err = tc.clients.GetSkupperClient().SkupperV2alpha1().Listeners(namespace).Get(ctx, "test-listener", metav1.GetOptions{})
+		if done, err := retryOnNotFound(err); !done {
+			return false, err
+		}
+		if actual.Status.StatusType == skupperv2alpha1.StatusError {
+			return true, nil
+		}
+		return false, nil
+	})
+
+	verifyStatus(t,
+		fixtures.Status(skupperv2alpha1.StatusError, "No active site in namespace"),
+		actual.Status.Status,
+	)
+}
