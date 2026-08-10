@@ -11,6 +11,7 @@ import (
 	"github.com/skupperproject/skupper/api/types"
 	"github.com/skupperproject/skupper/internal/fixtures"
 	"gotest.tools/v3/assert"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -64,4 +65,58 @@ func TestSiteWithListener(t *testing.T) {
 	routerConfig, err := tc.clients.GetKubeClient().CoreV1().ConfigMaps(namespace).Get(ctx, "skupper-router", metav1.GetOptions{})
 	assert.NilError(t, err)
 	assert.Assert(t, strings.Contains(routerConfig.Data[types.TransportConfigFile], "listener/mylistener"))
+}
+
+// Make sure that when you delete a Listener, the
+// Router Config gets updated to no longer contain it.
+func TestListenerDeleteCleansUp(t *testing.T) {
+	tc := setup(t)
+	namespace := "listener-delete"
+	tc.createNamespace(namespace)
+
+	ctx := context.Background()
+
+	// Create a Site and put a Listener in it.
+	_, err := tc.clients.GetSkupperClient().SkupperV2alpha1().Sites(namespace).Create(ctx, fixtures.Site("mysite", namespace), metav1.CreateOptions{})
+	assert.NilError(t, err)
+
+	_, err = tc.clients.GetSkupperClient().SkupperV2alpha1().Listeners(namespace).Create(ctx, listenerWithHostPort("mylistener", namespace, "mysvc", 8080), metav1.CreateOptions{})
+	assert.NilError(t, err)
+
+	// Wait until things have been reconciled and we can
+	// see that the Service exists.
+	// (The Service is created by the Controller.)
+	waitFor(t, 30*time.Second, 250*time.Millisecond, func() (bool, error) {
+		_, err := tc.clients.GetKubeClient().CoreV1().Services(namespace).Get(ctx, "mysvc", metav1.GetOptions{})
+		if done, err := retryOnNotFound(err); !done {
+			return false, err // If a real error occurred here, waitFor will
+			// fail the test right here.
+		}
+		return true, nil
+	})
+
+	// Delete the Listener.
+	err = tc.clients.GetSkupperClient().SkupperV2alpha1().Listeners(namespace).Delete(ctx, "mylistener", metav1.DeleteOptions{})
+	assert.NilError(t, err)
+
+	// Now wait until the Service is gone.
+	// If 30 seconds pass without it going away, fail the test.
+	waitFor(t, 30*time.Second, 250*time.Millisecond, func() (bool, error) {
+		_, err := tc.clients.GetKubeClient().CoreV1().Services(namespace).Get(ctx, "mysvc", metav1.GetOptions{})
+		if errors.IsNotFound(err) {
+			return true, nil // Service is gone. Fall through.
+		}
+		if err != nil {
+			return false, err // Real error -- fail the test.
+		}
+		// Service still exists — keep waiting
+		return false, nil
+	})
+
+	// Get the Router config and make sure it no longer knows about the Listener.
+	routerConfig, err := tc.clients.GetKubeClient().CoreV1().ConfigMaps(namespace).Get(ctx, "skupper-router", metav1.GetOptions{})
+	assert.NilError(t, err) // If problem getting it, fail the test.
+
+	// Make sure 'mylistener' is no longer there.
+	assert.Assert(t, !strings.Contains(routerConfig.Data[types.TransportConfigFile], "listener/mylistener"))
 }
