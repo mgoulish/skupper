@@ -120,3 +120,57 @@ func TestListenerDeleteCleansUp(t *testing.T) {
 	// Make sure 'mylistener' is no longer there.
 	assert.Assert(t, !strings.Contains(routerConfig.Data[types.TransportConfigFile], "listener/mylistener"))
 }
+
+func TestTwoListeners(t *testing.T) {
+	tc := setup(t)
+	namespace := "two-listeners"
+	tc.createNamespace(namespace)
+
+	ctx := context.Background()
+
+	// Create one Site into which we will put two Listeners.
+	_, err := tc.clients.GetSkupperClient().SkupperV2alpha1().Sites(namespace).Create(ctx, fixtures.Site("mysite", namespace), metav1.CreateOptions{})
+	assert.NilError(t, err)
+
+	// Create two Listeners with different everything.
+	_, err = tc.clients.GetSkupperClient().SkupperV2alpha1().Listeners(namespace).Create(ctx,
+		listenerWithHostPort("listener-a", namespace, "svc-a", 8080), metav1.CreateOptions{})
+	assert.NilError(t, err)
+
+	_, err = tc.clients.GetSkupperClient().SkupperV2alpha1().Listeners(namespace).Create(ctx,
+		listenerWithHostPort("listener-b", namespace, "svc-b", 9090), metav1.CreateOptions{})
+	assert.NilError(t, err)
+
+	// Wait until both Services show up.
+	waitFor(t, 30*time.Second, 250*time.Millisecond, func() (bool, error) {
+		_, errA := tc.clients.GetKubeClient().CoreV1().Services(namespace).Get(ctx, "svc-a", metav1.GetOptions{})
+		if done, err := retryOnNotFound(errA); !done {
+			return false, err // If there is an actual error, waitFor bails out right here.
+		}
+		_, errB := tc.clients.GetKubeClient().CoreV1().Services(namespace).Get(ctx, "svc-b", metav1.GetOptions{})
+		if done, err := retryOnNotFound(errB); !done {
+			return false, err // If there is an actual error, waitFor bails out right here.
+		}
+		return true, nil
+	})
+
+	// Is Service A present, and does it have a Listener A?
+	svcA, err := tc.clients.GetKubeClient().CoreV1().Services(namespace).Get(ctx, "svc-a", metav1.GetOptions{})
+	assert.NilError(t, err)
+	assert.Equal(t, len(svcA.Spec.Ports), 1)
+	assert.Equal(t, svcA.Spec.Ports[0].Port, int32(8080))
+	assert.Equal(t, svcA.Labels["internal.skupper.io/listener"], "listener-a")
+
+	// Is Service B present, and does it have a Listener B?
+	svcB, err := tc.clients.GetKubeClient().CoreV1().Services(namespace).Get(ctx, "svc-b", metav1.GetOptions{})
+	assert.NilError(t, err)
+	assert.Equal(t, len(svcB.Spec.Ports), 1)
+	assert.Equal(t, svcB.Spec.Ports[0].Port, int32(9090))
+	assert.Equal(t, svcB.Labels["internal.skupper.io/listener"], "listener-b")
+
+	// Does the Router Config know about both of them?
+	routerConfig, err := tc.clients.GetKubeClient().CoreV1().ConfigMaps(namespace).Get(ctx, "skupper-router", metav1.GetOptions{})
+	assert.NilError(t, err)
+	assert.Assert(t, strings.Contains(routerConfig.Data[types.TransportConfigFile], "listener/listener-a"))
+	assert.Assert(t, strings.Contains(routerConfig.Data[types.TransportConfigFile], "listener/listener-b"))
+}
