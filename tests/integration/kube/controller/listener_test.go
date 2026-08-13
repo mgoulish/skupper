@@ -95,3 +95,67 @@ func TestListenerWithoutSite(t *testing.T) {
 		actual.Status.Status,
 	)
 }
+
+func TestTwoListeners(t *testing.T) {
+
+	// In this test we wait for the Services corresponding to both Listeners to show up,
+	// and also separately wait for the names of both listeners to show up in the Router configmap.
+	// (Don't assume that the Config is ready just because the Services are.)
+	// If either of those don't happen within the timeout, the test fails.
+
+	tc := setup(t)
+	namespace := "multiple-listeners"
+	tc.createNamespace(namespace)
+
+	ctx := context.Background()
+
+	// Create the Site.
+	_, err := tc.clients.GetSkupperClient().SkupperV2alpha1().Sites(namespace).Create(ctx, fixtures.Site("mysite", namespace), metav1.CreateOptions{})
+	assert.NilError(t, err)
+
+	// Create two Listeners in the Site.
+	_, err = tc.clients.GetSkupperClient().SkupperV2alpha1().Listeners(namespace).Create(ctx,
+		listenerWithHostPort("listener-a", namespace, "svc-a", 8080), metav1.CreateOptions{})
+	assert.NilError(t, err)
+
+	_, err = tc.clients.GetSkupperClient().SkupperV2alpha1().Listeners(namespace).Create(ctx,
+		listenerWithHostPort("listener-b", namespace, "svc-b", 9090), metav1.CreateOptions{})
+	assert.NilError(t, err)
+
+	// Wait until both Services exist for the two Listeners.
+	waitFor(t, 30*time.Second, 250*time.Millisecond, func() (bool, error) {
+		_, errA := tc.clients.GetKubeClient().CoreV1().Services(namespace).Get(ctx, "svc-a", metav1.GetOptions{})
+		if done, err := retryOnNotFound(errA); !done {
+			return false, err
+		}
+		_, errB := tc.clients.GetKubeClient().CoreV1().Services(namespace).Get(ctx, "svc-b", metav1.GetOptions{})
+		if done, err := retryOnNotFound(errB); !done {
+			return false, err
+		}
+		return true, nil
+	})
+
+	// Wait until Router Config contains the names of both Listeners.
+	waitFor(t, 30*time.Second, 250*time.Millisecond, func() (bool, error) {
+		routerConfig, err := tc.clients.GetKubeClient().CoreV1().ConfigMaps(namespace).Get(ctx, "skupper-router", metav1.GetOptions{})
+		if done, err := retryOnNotFound(err); !done {
+			return false, err
+		}
+		cfg := routerConfig.Data[types.TransportConfigFile]
+		return strings.Contains(cfg, "listener/listener-a") &&
+			strings.Contains(cfg, "listener/listener-b"), nil
+	})
+
+	// Make sure the Services have the right Ports and Labels.
+	svcA, err := tc.clients.GetKubeClient().CoreV1().Services(namespace).Get(ctx, "svc-a", metav1.GetOptions{})
+	assert.NilError(t, err)
+	assert.Equal(t, len(svcA.Spec.Ports), 1)
+	assert.Equal(t, svcA.Spec.Ports[0].Port, int32(8080))
+	assert.Equal(t, svcA.Labels["internal.skupper.io/listener"], "listener-a")
+
+	svcB, err := tc.clients.GetKubeClient().CoreV1().Services(namespace).Get(ctx, "svc-b", metav1.GetOptions{})
+	assert.NilError(t, err)
+	assert.Equal(t, len(svcB.Spec.Ports), 1)
+	assert.Equal(t, svcB.Spec.Ports[0].Port, int32(9090))
+	assert.Equal(t, svcB.Labels["internal.skupper.io/listener"], "listener-b")
+}
