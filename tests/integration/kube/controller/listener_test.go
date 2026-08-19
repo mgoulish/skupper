@@ -159,3 +159,69 @@ func TestTwoListeners(t *testing.T) {
 	assert.Equal(t, svcB.Spec.Ports[0].Port, int32(9090))
 	assert.Equal(t, svcB.Labels["internal.skupper.io/listener"], "listener-b")
 }
+
+func TestListenerCreateDeleteStorm(t *testing.T) {
+	// What will happen if we rapidly create and then delete
+	// a Listener, with a create being the last thing we do?
+	// We would like to end up with a Listener, its Service,
+	// and a reference to it in the Router Config.
+	tc := setup(t)
+	namespace := "listener-storm"
+	tc.createNamespace(namespace)
+
+	ctx := context.Background()
+	listenerName := "storm-listener"
+	serviceName := "storm-svc"
+
+	// Make the Site for the test.
+	_, err := tc.clients.GetSkupperClient().SkupperV2alpha1().Sites(namespace).Create(ctx, fixtures.Site("mysite", namespace), metav1.CreateOptions{})
+	assert.NilError(t, err)
+
+	const iterations = 100
+
+	for i := 0; i < iterations; i++ {
+		listener := listenerWithHostPort(listenerName, namespace, serviceName, 8080)
+		_, err := tc.clients.GetSkupperClient().SkupperV2alpha1().Listeners(namespace).Create(ctx, listener, metav1.CreateOptions{})
+		assert.NilError(t, err, "create failed on iteration %d", i)
+
+		// In the last iteration, skip the deletion.
+		if i == iterations-1 {
+			break
+		}
+
+		err = tc.clients.GetSkupperClient().SkupperV2alpha1().Listeners(namespace).Delete(ctx, listenerName, metav1.DeleteOptions{})
+		assert.NilError(t, err, "delete failed on iteration %d", i)
+	}
+
+	// After the storm: wait until the final Listener is actually present.
+	// If it never shows up, the test fails.
+	waitFor(t, 60*time.Second, 250*time.Millisecond, func() (bool, error) {
+		_, err := tc.clients.GetSkupperClient().SkupperV2alpha1().Listeners(namespace).Get(ctx, listenerName, metav1.GetOptions{})
+		if done, err := retryOnNotFound(err); !done {
+			return false, err
+		}
+		return true, nil
+	})
+
+	// Also wait for the corresponding Service and
+	// for the Router Config to sync up.
+	// If they never do, the test fails.
+	waitFor(t, 60*time.Second, 250*time.Millisecond, func() (bool, error) {
+		_, err := tc.clients.GetKubeClient().CoreV1().Services(namespace).Get(ctx, serviceName, metav1.GetOptions{})
+		if done, err := retryOnNotFound(err); !done {
+			return false, err
+		}
+		routerConfig, err := tc.clients.GetKubeClient().CoreV1().ConfigMaps(namespace).Get(ctx, "skupper-router", metav1.GetOptions{})
+		if done, err := retryOnNotFound(err); !done {
+			return false, err
+		}
+		cfg := routerConfig.Data[types.TransportConfigFile]
+		return strings.Contains(cfg, "listener/"+listenerName), nil
+	})
+
+	// Confirm the Listener is still there after a couple seconds.
+	time.Sleep(2 * time.Second)
+	_, err = tc.clients.GetSkupperClient().SkupperV2alpha1().Listeners(namespace).Get(ctx, listenerName, metav1.GetOptions{})
+
+	assert.NilError(t, err, "Listener disappeared after changes should have stopped.")
+}
