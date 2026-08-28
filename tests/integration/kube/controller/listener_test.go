@@ -4,6 +4,7 @@ package kubecontrollertest
 
 import (
 	"context"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"strings"
 	"testing"
 	"time"
@@ -234,4 +235,140 @@ func TestListenerCreateDeleteStorm(t *testing.T) {
 	routerConfig, err := tc.clients.GetKubeClient().CoreV1().ConfigMaps(namespace).Get(ctx, "skupper-router", metav1.GetOptions{})
 	assert.NilError(t, err)
 	assert.Assert(t, strings.Contains(routerConfig.Data[types.TransportConfigFile], "listener/"+listenerName))
+}
+
+func TestIdenticalListenerFailover(t *testing.T) {
+	// Make two listeners that are identical except for their names.
+	// The first one ought to get the host and port, while the second
+	// one throws an error.
+	// After the first is deleted, the second should become active:
+	// Configured, owner of the Service, and present in router config.
+	tc := setup(t)
+	namespace := "identical-listener-failover"
+	tc.createNamespace(namespace)
+
+	ctx := context.Background()
+
+	_, err := tc.clients.GetSkupperClient().SkupperV2alpha1().Sites(namespace).Create(ctx, fixtures.Site("mysite", namespace), metav1.CreateOptions{})
+	assert.NilError(t, err)
+
+	a := listenerWithHostPort("listener-a", namespace, "shared-svc", 8080)
+	a.Spec.RoutingKey = "shared-key"
+	b := listenerWithHostPort("listener-b", namespace, "shared-svc", 8080)
+	b.Spec.RoutingKey = "shared-key"
+
+	_, err = tc.clients.GetSkupperClient().SkupperV2alpha1().Listeners(namespace).Create(ctx, a, metav1.CreateOptions{})
+	assert.NilError(t, err)
+	_, err = tc.clients.GetSkupperClient().SkupperV2alpha1().Listeners(namespace).Create(ctx, b, metav1.CreateOptions{})
+	assert.NilError(t, err)
+	t.Log("created listener-a and listener-b")
+
+	// Wait until 'B' is rejected because it's a duplicate
+	var lb *skupperv2alpha1.Listener
+	waitFor(t, 30*time.Second, 250*time.Millisecond, func() (bool, error) {
+		var err error
+		lb, err = tc.clients.GetSkupperClient().SkupperV2alpha1().Listeners(namespace).Get(ctx, "listener-b", metav1.GetOptions{})
+		if done, err := retryOnNotFound(err); !done {
+			return false, err
+		}
+		return lb.Status.StatusType == skupperv2alpha1.StatusError &&
+			strings.Contains(lb.Status.Message, "already exists"), nil
+	})
+	t.Logf("conflict detected: listener-b status=%q message=%q", lb.Status.StatusType, lb.Status.Message)
+
+	// 'A' should now own the Service and appear in the Router Config
+	waitFor(t, 30*time.Second, 250*time.Millisecond, func() (bool, error) {
+		// Call it "shared-svc" because it is shred between Listeners A and B
+		svc, err := tc.clients.GetKubeClient().CoreV1().Services(namespace).Get(ctx, "shared-svc", metav1.GetOptions{})
+		if done, err := retryOnNotFound(err); !done {
+			return false, err
+		}
+		if svc.Labels["internal.skupper.io/listener"] != "listener-a" {
+			return false, nil
+		}
+		routerConfig, err := tc.clients.GetKubeClient().CoreV1().ConfigMaps(namespace).Get(ctx, "skupper-router", metav1.GetOptions{})
+		if done, err := retryOnNotFound(err); !done {
+			return false, err
+		}
+		cfg := routerConfig.Data[types.TransportConfigFile]
+		return strings.Contains(cfg, "listener/listener-a") &&
+			!strings.Contains(cfg, "listener/listener-b"), nil
+	})
+	t.Log("listener-a is in Service label and Router Config")
+
+	// Now we delete the active Listener
+	t.Log("deleting listener-a")
+	err = tc.clients.GetSkupperClient().SkupperV2alpha1().Listeners(namespace).Delete(ctx, "listener-a", metav1.DeleteOptions{})
+	assert.NilError(t, err)
+
+	waitFor(t, 30*time.Second, 250*time.Millisecond, func() (bool, error) {
+		_, err := tc.clients.GetSkupperClient().SkupperV2alpha1().Listeners(namespace).Get(ctx, "listener-a", metav1.GetOptions{})
+		if errors.IsNotFound(err) {
+			return true, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return false, nil
+	})
+	t.Log("listener-a deleted")
+
+	// Now B should take over, and get into the Router Config.
+	waitFor(t, 60*time.Second, 250*time.Millisecond, func() (bool, error) {
+		var err error
+		lb, err = tc.clients.GetSkupperClient().SkupperV2alpha1().Listeners(namespace).Get(ctx, "listener-b", metav1.GetOptions{})
+		if done, err := retryOnNotFound(err); !done {
+			return false, err
+		}
+		if lb.Status.StatusType == skupperv2alpha1.StatusError &&
+			strings.Contains(lb.Status.Message, "already exists") {
+			return false, nil
+		}
+
+		svc, err := tc.clients.GetKubeClient().CoreV1().Services(namespace).Get(ctx, "shared-svc", metav1.GetOptions{})
+		if done, err := retryOnNotFound(err); !done {
+			return false, err
+		}
+		if svc.Labels["internal.skupper.io/listener"] != "listener-b" {
+			return false, nil
+		}
+
+		routerConfig, err := tc.clients.GetKubeClient().CoreV1().ConfigMaps(namespace).Get(ctx, "skupper-router", metav1.GetOptions{})
+		if done, err := retryOnNotFound(err); !done {
+			return false, err
+		}
+		cfg := routerConfig.Data[types.TransportConfigFile]
+		return strings.Contains(cfg, "listener/listener-b") &&
+			!strings.Contains(cfg, "listener/listener-a"), nil
+	})
+	t.Logf("failover complete: listener-b status=%q message=%q", lb.Status.StatusType, lb.Status.Message)
+	// It's OK if the status is "Pending/Not Matched", because that means
+	// that B has been configured and bound to the host and port, and that the
+	// Service + router config exist now.
+	// Which is all we care about for this test.
+
+	// Final complete-state checks.
+
+	// B should now be the active Listener for host:port.
+	// Pending/Not Matched is OK (there is no Connector in this test).
+	// And we should no longer see the duplicate host/port Error.
+	assert.Assert(t, lb.Status.StatusType != skupperv2alpha1.StatusError ||
+		!strings.Contains(lb.Status.Message, "already exists"))
+	configured := meta.FindStatusCondition(lb.Status.Conditions, skupperv2alpha1.CONDITION_TYPE_CONFIGURED)
+	assert.Assert(t, configured != nil)
+	assert.Equal(t, configured.Status, metav1.ConditionTrue)
+
+	// Listener B should now own the Service.
+	svc, err := tc.clients.GetKubeClient().CoreV1().Services(namespace).Get(ctx, "shared-svc", metav1.GetOptions{})
+	assert.NilError(t, err)
+	assert.Equal(t, svc.Labels["internal.skupper.io/listener"], "listener-b")
+	assert.Equal(t, len(svc.Spec.Ports), 1)
+	assert.Equal(t, svc.Spec.Ports[0].Port, int32(8080))
+
+	// And the Router should now know about Listener B, and *only* Listener B.
+	routerConfig, err := tc.clients.GetKubeClient().CoreV1().ConfigMaps(namespace).Get(ctx, "skupper-router", metav1.GetOptions{})
+	assert.NilError(t, err)
+	cfg := routerConfig.Data[types.TransportConfigFile]
+	assert.Assert(t, strings.Contains(cfg, "listener/listener-b"))
+	assert.Assert(t, !strings.Contains(cfg, "listener/listener-a"))
 }
