@@ -320,8 +320,11 @@ func TestIdenticalListenerFailover(t *testing.T) {
 		if done, err := retryOnNotFound(err); !done {
 			return false, err
 		}
-		if lb.Status.StatusType == skupperv2alpha1.StatusError &&
-			strings.Contains(lb.Status.Message, "already exists") {
+		if lb.Status.StatusType == skupperv2alpha1.StatusError {
+			return false, nil
+		}
+		configured := meta.FindStatusCondition(lb.Status.Conditions, skupperv2alpha1.CONDITION_TYPE_CONFIGURED)
+		if configured == nil || configured.Status != metav1.ConditionTrue {
 			return false, nil
 		}
 
@@ -352,8 +355,7 @@ func TestIdenticalListenerFailover(t *testing.T) {
 	// B should now be the active Listener for host:port.
 	// Pending/Not Matched is OK (there is no Connector in this test).
 	// And we should no longer see the duplicate host/port Error.
-	assert.Assert(t, lb.Status.StatusType != skupperv2alpha1.StatusError ||
-		!strings.Contains(lb.Status.Message, "already exists"))
+	assert.Assert(t, lb.Status.StatusType != skupperv2alpha1.StatusError)
 	configured := meta.FindStatusCondition(lb.Status.Conditions, skupperv2alpha1.CONDITION_TYPE_CONFIGURED)
 	assert.Assert(t, configured != nil)
 	assert.Equal(t, configured.Status, metav1.ConditionTrue)
