@@ -237,6 +237,9 @@ func TestListenerCreateDeleteStorm(t *testing.T) {
 	assert.Assert(t, strings.Contains(routerConfig.Data[types.TransportConfigFile], "listener/"+listenerName))
 }
 
+// TestIdenticalListenerFailover checks that when two Listeners are identical
+// except for their names, only the first one is used, but if the first one
+// then goes away, the second one takes over.
 func TestIdenticalListenerFailover(t *testing.T) {
 	// Make two listeners that are identical except for their names.
 	// The first one ought to get the host and port, while the second
