@@ -67,6 +67,8 @@ func TestSiteWithListener(t *testing.T) {
 	assert.Assert(t, strings.Contains(routerConfig.Data[types.TransportConfigFile], "listener/mylistener"))
 }
 
+// TestListenerWithoutSite tries to make a Listener when no site has been defined.
+// If Skupper does not throw an appropriate error, the test fails.
 func TestListenerWithoutSite(t *testing.T) {
 	tc := setup(t)
 	namespace := "listener-no-site"
@@ -97,13 +99,10 @@ func TestListenerWithoutSite(t *testing.T) {
 	)
 }
 
+// TestTwoListeners makes two Listeners on a Site. It waits for both to show up,
+// then separately waits for the names of both listeners to show up in the Router
+// configmap. If either of those don't happen within the timeout, the test fails.
 func TestTwoListeners(t *testing.T) {
-
-	// In this test we wait for the Services corresponding to both Listeners to show up,
-	// and also separately wait for the names of both listeners to show up in the Router configmap.
-	// (Don't assume that the Config is ready just because the Services are.)
-	// If either of those don't happen within the timeout, the test fails.
-
 	tc := setup(t)
 	namespace := "multiple-listeners"
 	tc.createNamespace(namespace)
@@ -161,11 +160,11 @@ func TestTwoListeners(t *testing.T) {
 	assert.Equal(t, svcB.Labels["internal.skupper.io/listener"], "listener-b")
 }
 
+// TestListenerCreateDeleteStorm repeatedly creates and then deletes the same
+// Listener, as rapidly as possible, making sure to end up with a creation having
+// been the last command. It confirms that we do end up with a Listener,
+// its associated Service, and a reference to it in the Router Config.
 func TestListenerCreateDeleteStorm(t *testing.T) {
-	// What will happen if we rapidly create and then delete
-	// a Listener, with a create being the last thing we do?
-	// It should end up with a Listener, its Service,
-	// and a reference to it in the Router Config.
 	tc := setup(t)
 	namespace := "listener-storm"
 	tc.createNamespace(namespace)
