@@ -81,12 +81,38 @@ func TestUpdateListenerPropagatesExposeErrorByName(t *testing.T) {
 // TestUpdateListenerExposeErrorsDoNotCrossListeners checks that an
 // expose error for listener-a is not returned as listener-b's error.
 func TestUpdateListenerExposeErrorsDoNotCrossListeners(t *testing.T) {
-	eb := newBindingsForExposeTest(errors.New("fail-a"))
+	// First pass: register both listeners with a successful Expose so
+	// a later UpdateListener with the same spec will not call ListenerUpdated.
+	eb := newBindingsForExposeTest(nil)
 
-	_, errA := eb.UpdateListener("listener-a", testListener("listener-a", "svc-a"))
-	assert.ErrorContains(t, errA, "fail-a")
+	_, err := eb.UpdateListener("listener-a", testListener("listener-a", "svc-a"))
+	assert.NilError(t, err)
+	_, err = eb.UpdateListener("listener-b", testListener("listener-b", "svc-b"))
+	assert.NilError(t, err)
 
-	eb.context = &fakeBindingContext{exposeErr: errors.New("fail-b")}
-	_, errB := eb.UpdateListener("listener-b", testListener("listener-b", "svc-b"))
-	assert.ErrorContains(t, errB, "fail-b")
+	// Make both errors before consuming either one.
+	errA := errors.New("fail-a")
+	errB := errors.New("fail-b")
+	eb.lastListenerExposeErr["listener-a"] = errA
+	eb.lastListenerExposeErr["listener-b"] = errB
+
+	// At this point they sure should both contain their own error message.
+	assert.ErrorContains(t, eb.lastListenerExposeErr["listener-a"], "fail-a")
+	assert.ErrorContains(t, eb.lastListenerExposeErr["listener-b"], "fail-b")
+
+	// Updating Listener A should return A's error,
+	// and should *consume* A's error,
+	// while the error in B should not be changed.
+	_, gotA := eb.UpdateListener("listener-a", testListener("listener-a", "svc-a"))
+	assert.ErrorContains(t, gotA, "fail-a")
+	assert.ErrorContains(t, eb.lastListenerExposeErr["listener-b"], "fail-b")
+	_, stillA := eb.lastListenerExposeErr["listener-a"]
+	assert.Assert(t, !stillA, "listener-a error should have been consumed")
+
+	// Now updating Listener B should return-and-consume C's error.
+	// We already know that A's error has been consumed.
+	_, gotB := eb.UpdateListener("listener-b", testListener("listener-b", "svc-b"))
+	assert.ErrorContains(t, gotB, "fail-b")
+	_, stillB := eb.lastListenerExposeErr["listener-b"]
+	assert.Assert(t, !stillB, "listener-b error should have been consumed")
 }
