@@ -109,7 +109,7 @@ func TestUpdateListenerExposeErrorsDoNotCrossListeners(t *testing.T) {
 	_, stillA := eb.lastListenerExposeErr["listener-a"]
 	assert.Assert(t, !stillA, "listener-a error should have been consumed")
 
-	// Now updating Listener B should return-and-consume C's error.
+	// Now updating Listener B should return-and-consume B's error.
 	// We already know that A's error has been consumed.
 	_, gotB := eb.UpdateListener("listener-b", testListener("listener-b", "svc-b"))
 	assert.ErrorContains(t, gotB, "fail-b")
